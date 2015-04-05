@@ -1,15 +1,14 @@
 # -*- coding: utf-8 -*-
 import tweepy
 import sys
+from res import globalobjs
 from model import mongomodel
-from resources import globalobjs
 
 
 class MongoStreamListener(tweepy.StreamListener):
     def __init__(self, trend, db, logfile):
         self.trend = trend
         self.db = db
-        self.trendId = mongomodel.addTrend(trend, db)
         self.logfile = logfile
         self.calls = 0
         self.step = 1000
@@ -23,7 +22,7 @@ class MongoStreamListener(tweepy.StreamListener):
         #DAO based approach, initdao in __init__?
         self.calls += 1
 
-        ret = mongomodel.insertMongo(tweet, self.trendId, self.db)
+        ret = mongomodel.insertMongo(tweet, self.trend, self.db)
         ret = ret.encode('utf-8', 'ignore')
         self.logfile.write(ret)
         if self.calls % self.step == 0:
@@ -59,7 +58,7 @@ def main():
     if len(args) > 1:
         keyset = int(args[1])
 
-    globalobjs.init(keyset)
+    globalobjs.init(trend, keyset)
     auth = tweepy.OAuthHandler(globalobjs.consumer_key, globalobjs.consumer_secret)
     auth.set_access_token(globalobjs.access_token, globalobjs.access_token_secret)
     # api = tweepy.API(auth)
@@ -71,7 +70,7 @@ def main():
         print "User stopped with Ctrl+C"
     finally:
         print "ENTER FINALLY"
-        globalobjs.destroy()
+        globalobjs.destroy(trend)
 
 if __name__ == '__main__':
     main()

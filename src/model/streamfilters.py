@@ -2,12 +2,18 @@
 
 import re
 from unidecode import unidecode
-from resources import globalobjs
+from res import globalobjs
+
+urlpat = re.compile(r"(?i)\b((?:[a-z][\w-]+:(?:/{1,3}|[a-z0-9%])|www\d{0,3}[.]|[a-z0-9.\-]+[.][a-z]{2,4}/)(?:[^\s()<>]+|\(([^\s()<>]+|(\([^\s()<>]+\)))*\))+(?:\(([^\s()<>]+|(\([^\s()<>]+\)))*\)|[^\s`!()\[\]{};:'\".,<>?«»“”‘’]))")
+mentionpat = re.compile(r"@[^\s]+")
+hastagpat = re.compile(r'#([^\s]+)')
+metapunctpat = re.compile('[^a-zA-Z0-9]+')
+repeatgrp1 = re.compile(r"(.)\1{2,}", re.DOTALL)
+repeatgrp2 = re.compile(r"(..)\1{2,}", re.DOTALL)
+repeatsubspat = r"\1\1"
 
 
-
-
-#===============ENCODE===============
+# ===============ENCODE===============
 def encodeStream(tweet):
     #tweet=unicode(tweet,'utf-8')
     #tweet=tweet.encode('utf-8','ignore')
@@ -16,19 +22,21 @@ def encodeStream(tweet):
     return tweet
 
 
-#===============CLEANSING===============
-def removeUrl(tweet):
-    tweet = re.sub(globalobjs.urlpat, '', tweet)
-    return tweet
-
-
+# ===============CLEANSING===============
 def removeMentions(tweet):
-    tweet = re.sub(globalobjs.mentionpat, '', tweet)
+    tweet = re.sub(mentionpat, '', tweet)
     return tweet
+
+
+def removeUrl(tweet):
+    tweet = re.sub(urlpat, '', tweet)
+    return tweet
+
 
 
 def removeHashtags(tweet):
-    tweet = re.sub(globalobjs.hastagpat, r'\1', tweet)
+    # tweet = re.sub(hastagpat, r'\1', tweet)
+    tweet = re.sub(hastagpat, '', tweet)
     return tweet
 
 
@@ -40,43 +48,62 @@ def isRT(tweet):
         return False
 
 
-#===============TRIMMING===============
+# ===============TRIMMING===============
 def removeMetaPunct(tweet):
-    tweet = re.sub(globalobjs.metapunctpat, ' ', tweet)
+    tweet = re.sub(metapunctpat, ' ', tweet)
     return tweet
 
 
-def replaceRepeats_gt2(tweet_tokens):
+def replaceRepeats_gt2(tweet_str):
     replacedTokens = []
-    for token in tweet_tokens:
-        replacedTokens.append(re.sub(globalobjs.repeatgrp1, globalobjs.repeatsubspat, re.sub(globalobjs.repeatgrp2, globalobjs.repeatsubspat, token)))
-    return replacedTokens
+    word_list = tweet_str.split(' ')
+    for token in word_list:
+        replacedTokens.append(re.sub(repeatgrp1, repeatsubspat, re.sub(repeatgrp2, repeatsubspat, token)))
+    replacedTokens_str = ' '.join([i for i in replacedTokens])
+    return replacedTokens_str
 
 
 def trimTweet(tweet):
     return tweet.strip()
 
 
-#===============TOKENIZATION===============
-def tokenizeTweet(tweet):
-    return [t for t in tweet.split(' ') if t is not '']
+# ===============TOKENIZATION===============
+def ngrams(input, n):
+  input = input.split(' ')
+  output = {}
+  for i in range(len(input)-n+1):
+    g = ' '.join(input[i:i+n])
+    output.setdefault(g, 0)
+    output[g] += 1
+  return output
 
 
-#===============STOPWORDS===============
+def unigramifyTweet(tweet_str):
+    unigrams = ngrams(tweet_str, 1)
+    return unigrams
 
-def removeStopWords(tweet_tokens):
+
+def bigramifyTweet(tweet_str):
+    bigrams = ngrams(tweet_str, 2)
+    return bigrams
+
+
+# ===============STOPWORDS===============
+
+def removeStopWords(tweet_str):
     #print "EMPTY" if not globalobjs.stopwords_list else "FULL"
-    after_stopwords = [tok for tok in tweet_tokens if tok not in globalobjs.stopwords_list]
+    word_list = tweet_str.split(' ')
+    after_stopwords = ' '.join([i for i in word_list if i not in globalobjs.stopwords_list])
     return after_stopwords
 
 
-#===============SLANGS===============
+# ===============SLANGS===============
 
 def translateSlangs(tweet_tokens):
     return [subel for sub in [globalobjs.slangDict[tok].split() if tok in globalobjs.slangDict and globalobjs.slangDict[tok] is not '' else [tok] for tok in tweet_tokens] for subel in sub]
 
 
-#===============BINDER FUNCTION===============
+# ===============BINDER FUNCTION===============
 #   [Y]encode -> [Y]trim -> [Y]urls -> [Y]mentions -> [Y]hashtags ->
 #                [Y]punctuation -> [Y]metachar -> [Y]trim ->
 #   [Y]tokenize ->
@@ -85,8 +112,6 @@ def translateSlangs(tweet_tokens):
 def processTweetText(tweet):
 #   [Y]encode ->
     tweet = encodeStream(tweet)
-
-
 
 
 #   [Y]trim ->
@@ -103,26 +128,23 @@ def processTweetText(tweet):
     tweet = removeMetaPunct(tweet)
 #   [Y]trim ->
     tweet = trimTweet(tweet)
-
-
-#   [Y]tokenize->
-    tokens = tokenizeTweet(tweet)
-
-
-#   [N]slangs->
-#   tokens=translateSlangs(tokens)
+    
 #   [Y]repeats->
-    tokens = replaceRepeats_gt2(tokens)
+    tweet = replaceRepeats_gt2(tweet)
 #   [N]slangs->
 #   tokens=translateSlangs(tokens)
 #   [Y]stopwords->
-    tokens = removeStopWords(tokens)
+    tweet = removeStopWords(tweet)
 
-    return tokens
+    # return bigram list
+    #return tokens
+    return tweet
+
 
 
 def testTweetProcessor():
     #Works!
+    globalobjs.init('test', 1)
     url_test = ["Office For iPhone And Android Is Now Free  http://tcrn.ch/1rH7Fkx  by @alex",
                 "1. amazing fit  @TBdressClub dress=>http://goo.gl/qwIwus        shoes=>http://goo.gl/Y95sdJ   pic.twitter.com/3dE4SFgUmT"]
     for urls in url_test:
@@ -158,13 +180,13 @@ def testTweetProcessor():
     #Doesn't work
     repeats_test = "Ohhh Shittt it's missed gym o'clock again...FUCKKKK!!\n*cracks 3rd beer"
     print 'replaceRepeats_gt2 BEFORE:', repeats_test
-    print 'replaceRepeats_gt2 AFTER:', replaceRepeats_gt2(repeats_test.split())
+    print 'replaceRepeats_gt2 AFTER:', replaceRepeats_gt2(repeats_test)
 
     #works!
     stopword_test = 'anybody considering best inward several provided'
     stopword_test_tokens = stopword_test.split()
     print 'removeStopWords BEFORE:', stopword_test_tokens
-    print 'removeStopWords AFTER:', removeStopWords(stopword_test_tokens)
+    print 'removeStopWords AFTER:', removeStopWords(stopword_test)
 
     #slangword_test=''
 
