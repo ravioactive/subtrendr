@@ -70,7 +70,7 @@ def main():
         print "User stopped with Ctrl+C"
     finally:
         print "ENTER FINALLY"
-        globalobjs.destroy(trend)
+        globalobjs.destroy()
 
 if __name__ == '__main__':
     main()

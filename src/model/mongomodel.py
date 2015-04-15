@@ -28,7 +28,7 @@ def insertMongo(twitterResponseJSON, trend, db):
     return ret
 
 
-def addNGramsToDictionaries(db, trend, unigrams, bigrams):
+def addNGramsToDictionaries(db, trend, unigrams, bigrams, trigrams):
     # add to respective dictionaries
     unigramDict = db[trend+'_unigr']
     for uni in unigrams.keys():
@@ -43,13 +43,21 @@ def addNGramsToDictionaries(db, trend, unigrams, bigrams):
         b = bigramDict.find_one({'_id': bi})
         if b is None:
             bid = bigramDict.count()+1
-            b = { '_id' : b, 'ngramid' : bid }
+            b = { '_id' : bi, 'ngramid' : bid }
             upsert(b, bigramDict)
+
+    trigramDict = db[trend+'_trigr']
+    for tri in trigrams.keys():
+        t = trigramDict.find_one({'_id': tri})
+        if t is None:
+            tid = trigramDict.count()+1
+            t = { '_id': tri, 'ngramid' : tid }
+            upsert(t, trigramDict)
 
     return
 
 
-def upsertNGramCounts(db, trend, unigrams, bigrams):
+def upsertNGramCounts(db, trend, unigrams, bigrams, trigrams):
     # This collection will be named uniquely for each trend
     # we have a collection with 
     #    {ngram-id, total, last edited, last total, [{count, time}]}
@@ -70,6 +78,7 @@ def upsertNGramCounts(db, trend, unigrams, bigrams):
 
         u['hist'].insert(0, (u['total'], now))
         upsert(u, unigramCountColl)
+        print 'UNIGRAM >> ', u['_id'], '['+str(u['last_total']), '->', str(u['total'])+']', '@', str(now)
 
     b = None
     bigramCountColl = db[trend+'_bistate']
@@ -85,6 +94,23 @@ def upsertNGramCounts(db, trend, unigrams, bigrams):
 
         b['hist'].insert(0, (b['total'], now))
         upsert(b, bigramCountColl)
+        print 'BIGRAM >> ', b['_id'], '['+str(b['last_total']), '->', str(b['total'])+']', '@', str(now)
+
+    t = None
+    trigramCountColl = db[trend+'_tristate']
+    for tri in trigrams.keys():
+        t = trigramCountColl.find_one({'_id' : tri})
+        if t is None:
+            t = { '_id' : tri, 'total' : trigrams[tri], 'last_change' : now, 'last_total' : -1}
+            t['hist'] = []
+        else:
+            t['last_total'] = t['total']
+            t['total'] += trigrams[tri]
+            t['last_change'] = now
+
+        t['hist'].insert(0, (t['total'], now))
+        upsert(t, trigramCountColl)
+        print 'TRIGRAM >> ', t['_id'], '['+str(t['last_total']), '->', str(t['total'])+']', '@', str(now)
     return
 
 
@@ -99,9 +125,9 @@ def addTweet(tweetJSON, trend, db):
     
     if newTweet == True:
         tweet = parseTweet(tweetJSON)
-        addNGramsToDictionaries(db, trend, tweet['unigrams'], tweet['bigrams'])
+        addNGramsToDictionaries(db, trend, tweet['unigrams'], tweet['bigrams'], tweet['trigrams'])
     
-    upsertNGramCounts(db, trend, tweet['unigrams'], tweet['bigrams'])
+    upsertNGramCounts(db, trend, tweet['unigrams'], tweet['bigrams'], tweet['trigrams'])
 
     if newTweet:
         tweets = db[trend+'_tweets']
@@ -162,6 +188,9 @@ def parseTweet(tweetJSON):
 
     tweetBigrams = streamfilters.bigramifyTweet(cleansedTweet)
     parsedTweet['bigrams'] = tweetBigrams
+
+    tweetTrigrams = streamfilters.trigramifyTweet(cleansedTweet)
+    parsedTweet['trigrams'] = tweetTrigrams
 
     parsedTweet['_id'] = str(tweetJSON['id_str'])
     parsedTweet['lang'] = str(tweetJSON['lang'])

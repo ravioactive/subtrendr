@@ -87,6 +87,10 @@ def bigramifyTweet(tweet_str):
     bigrams = ngrams(tweet_str, 2)
     return bigrams
 
+def trigramifyTweet(tweet_str):
+    trigrams = ngrams(tweet_str, 3)
+    return trigrams
+
 
 # ===============STOPWORDS===============
 
