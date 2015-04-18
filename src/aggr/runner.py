@@ -39,7 +39,7 @@ def quadraticKernel(x, a, b, c):
 	return a*x*x + b*x + c
 
 
-def curvefitting(lastKArr):
+def curvefitting(lastKArr, slope_thresh = 0):
 	if len(lastKArr) < 2:
 		print 'Too less to infer from: Only 1 point.'
 		return (0, False)
@@ -48,10 +48,108 @@ def curvefitting(lastKArr):
 	xdata = npLastKArr[:,0]
 	ydata = npLastKArr[:,1]
 
-	params = curve_fit(linearKernel, xdata, ydata)
-	slope = params[0][0]
-	print 'm =', '{0:.3f}'.format(slope), 'X:', xdata, 'Y:', ydata
-	return (slope, slope > 0)
+	print 'X:', xdata, 'Y:', ydata,
+	params = []
+	slope = -1
+	try:
+		params = curve_fit(linearKernel, xdata, ydata)
+		slope = params[0][0]
+	except RuntimeError as rte:
+		print rte
+		slope = -1
+		pass
+
+	print 'm =', '{0:.3f}'.format(slope)
+	return (slope, slope > slope_thresh)
+
+
+def findInsertPosition(tuplearr, newval):
+	size = len(tuplearr)
+	if size == 0:
+		return 0
+	if size == 1:
+		if newval >= tuplearr[0][1]:
+			return 0
+		else:
+			return 1
+	else:
+		pos = -1
+		for i in range(0, size):
+			if tuplearr[i][1] < newval:
+				pos = i
+				break
+		if pos == -1:
+			pos = i
+		return pos
+
+
+def checkAcceleratingConsistent(db, trendname, lastk, lastk_accel, accel_thresh = 0, consistent_fraction = 3):
+	subtrendsColl = db[trendname+'_subtrend_'+str(lastk)]
+	subtrendsBulk = subtrendsColl.initialize_unordered_bulk_op()
+	query = {'trending_window' : time_window}
+	filters = {'_id':True, 'n':True, 'sos':True, 'sos_stats':True, 'trend_count' : True, 'st_hist' : {'$slice' : lastk_accel}}
+
+	subtrendCursor = subtrendsColl.find(query, filters)
+	if subtrendCursor.count() < 1:
+		print 'checkAcceleratingConsistent: Nothing to do'
+		return False
+
+	accel_unigrams = {}
+	accel_bigrams = {}
+	accel_trigrams = {}
+	consistent_unigrams = []
+	consistent_bigrams = []
+	consistent_trigrams = []
+	num_accel_updates = 0
+	for doc in subtrendCursor:
+		(slope, _) = curvefitting(doc['st_hist'], accel_thresh)
+		insertpos = findInsertPosition(doc['sos_stats'], slope)
+		is_consistent = True if (int(doc['trend_count'])+1) >= (time_window/consistent_fraction) else False
+		accel_inc = 0 if slope <= accel_thresh else 1
+		acc_query = {'_id' : str(doc['_id'])}
+		acc_update = {
+		'$set' : {'sos' : slope, 'consistent' : is_consistent}, 
+		'$inc': {'accel_count' : accel_inc, 'trend_count' : 1},
+		'$push': {'sos_stats' : {'$each' : [(time_window, slope)], '$position' : insertpos, '$slice': 5}}
+		}
+		if is_consistent == True:
+			if doc['n'] == 1:
+				consistent_unigrams.append(str(doc['_id']))
+			if doc['n'] == 2:
+				consistent_bigrams.append(str(doc['_id']))
+			if doc['n'] == 3:
+				consistent_trigrams.append(str(doc['_id']))
+		if slope > accel_thresh:
+			if doc['n'] == 1:
+				accel_unigrams[str(doc['_id'])] = slope
+			if doc['n'] == 2:
+				accel_bigrams[str(doc['_id'])] = slope
+			if doc['n'] == 3:
+				accel_trigrams[str(doc['_id'])] = slope
+		subtrendsBulk.find(acc_query).update(acc_update)
+		num_accel_updates += 1
+
+	if num_accel_updates < 1:
+		print 'Not a single ngram accelerating for time window', time_window
+		return False
+
+	rec_consistent_ngrams = {'unigrams' : consistent_unigrams, 'bigrams': consistent_bigrams, 'trigrams': consistent_trigrams}
+	rec_consistent_counts = {'uni':len(consistent_unigrams), 'bi':len(consistent_bigrams), 'tri':len(consistent_trigrams), 'total':len(consistent_unigrams)+len(consistent_bigrams)+len(consistent_trigrams)}
+	rec_accel_ngrams = { 'unigrams' : accel_unigrams, 'bigrams' : accel_bigrams, 'trigrams' : accel_trigrams }
+	rec_accel_counts = { 'uni':len(accel_unigrams), 'bi':len(accel_bigrams), 'tri':len(accel_trigrams), 'total' : len(accel_unigrams)+len(accel_bigrams)+len(accel_trigrams)}
+	subtrendRecordColl = db[trendname+'_subtrec_'+str(lastk)]
+	rec_query = {'_id' : time_window}
+	rec_update = {'$set' : {'accelerating' : rec_accel_ngrams, 'accel_count' : rec_accel_counts, 'consistent':rec_consistent_ngrams, 'consistent_count':rec_consistent_counts}}
+	subtrendRecordColl.update(rec_query, rec_update);
+	
+	try:
+		result = subtrendsBulk.execute()
+	except BulkWriteError as bwe:
+		print '\n checkAcceleratingConsistent: Exception in bulk updating subtrending collection\n'
+		print bwe.details
+		return False
+
+	return True
 
 
 def checkSubtrending(db, trendname, lastk):
@@ -83,14 +181,18 @@ def checkSubtrending(db, trendname, lastk):
 		(slope, qualifies) = curvefitting(doc['ws_hist'])
 		if qualifies:
 			st_query = {'_id' : str(doc['_id'])}
-			st_update = {'$setOnInsert' : {'_id': str(doc['_id']), 'n' : doc['n']}, '$set' : {'trending_window' : time_window, 'latest_window' : doc['latest_window'], 'latest_slope' : slope}, '$push' : {'st_hist': {'$each' : [(time_window, slope)], '$position':0}}}
+			st_update = {
+			'$setOnInsert' : {'_id': str(doc['_id']), 'n' : doc['n'], 'sos' : -1, 'sos_stats' :[], 'trend_count': 1, 'consistent' : False, 'accel_count' : 0 }, 
+			'$set' : {'trending_window' : time_window, 'latest_window' : doc['latest_window'], 'latest_slope' : slope}, 
+			'$push' : {'st_hist': {'$each' : [(time_window, slope)], '$position':0}}
+			}
+			subtrendsBulk.find(st_query).upsert().update(st_update)
 			if doc['n'] == 1:
 				uni_subtrngrams[str(doc['_id'])] = slope
 			elif doc['n'] == 2:
 				bi_subtrngrams[str(doc['_id'])] = slope
 			elif doc['n'] == 3:
 				tri_subtrngrams[str(doc['_id'])] = slope
-			subtrendsBulk.find(st_query).upsert().update(st_update)
 			numsubtrupdates += 1
 			print 'QUALIFIES'
 		else:
@@ -109,7 +211,7 @@ def checkSubtrending(db, trendname, lastk):
 	try:
 		result = subtrendsBulk.execute()
 	except BulkWriteError as bwe:
-		print '\n Exception in bulk updating subtrending collection\n'
+		print '\n checkSubtrending: Exception in bulk updating subtrending collection\n'
 		print bwe.details
 		return False
 
@@ -209,6 +311,83 @@ def printSubtrending(db, trendname, lastk):
 	print 'Trending 2GRAMs\n---------------\n', bislopes
 	print 'Trending 3GRAMs\n---------------\n', trislopes
 
+	subtrendRecordColl = db[trendname+'_subtrec_'+str(lastk)]
+	subtrec_query = {'_id':time_window}
+	subtrec_filters = {'accelerating':True, 'accel_count':True, 'consistent':True, 'consistent_count':True}
+	subtrec_cursor = subtrendRecordColl.find(subtrec_query, subtrec_filters)
+
+	if subtrec_cursor.count() < 1:
+		print "Record collection has nothing, Weird!"
+		return
+
+	for doc in subtrec_cursor:
+		acceleratingCount = doc['accel_count']
+		acc_str = 'Total accelerating Ngrams = ' + str(acceleratingCount['total']) + '\n'
+		acc_unigramstr = 'Accelerating unigrams = ' + str(acceleratingCount['uni'])
+		acc_bigramstr = 'Accelerating bigrams = ' + str(acceleratingCount['bi'])
+		acc_trigramstr = 'Accelerating trigrams = ' + str(acceleratingCount['tri'])
+		if acceleratingCount['total'] > 0:
+			acceleratingNgrams = doc['accelerating']
+			# Unigrams
+			if acceleratingCount['uni'] > 0:
+				acc_unigramstr += '\n'
+				acceleratingUnigrams = acceleratingNgrams['unigrams']
+				for unigram in acceleratingUnigrams.keys():
+					acc_unigramstr += unigram + ':' + '{0:.3f}'.format(acceleratingUnigrams[unigram])+ ', '
+			
+			# Bigrams
+			if acceleratingCount['bi'] > 0:
+				acc_bigramstr += '\n'
+				acceleratingBigrams = acceleratingNgrams['bigrams']
+				for bigram in acceleratingBigrams.keys():
+					acc_bigramstr += bigram + ':' + '{0:.3f}'.format(acceleratingBigrams[bigram])+ ', '
+
+			# Trigrams
+			if acceleratingCount['tri'] > 0:
+				acc_trigramstr += '\n'
+				acceleratingTrigrams = acceleratingNgrams['trigrams']
+				for trigram in acceleratingTrigrams.keys():
+					acc_trigramstr += trigram + ':' + '{0:.3f}'.format(acceleratingTrigrams[trigram])+ ', '
+	
+		acc_unigramstr += '\n'
+		acc_bigramstr += '\n'
+		acc_trigramstr += '\n'
+		print "Accelerating Ngrams: ", acc_str, acc_unigramstr, acc_bigramstr, acc_trigramstr
+		
+		consistentCounts = doc['consistent_count']
+		cons_str = 'Total consistent Ngrams = ' + str(consistentCounts['total']) + '\n'
+		cons_unigramstr = 'Consistent unigrams = ' + str(consistentCounts['uni'])
+		cons_bigramstr = 'Consistent bigrams = ' + str(consistentCounts['bi'])
+		cons_trigramstr = 'Consistent trigrams = ' + str(consistentCounts['tri'])
+		if consistentCounts['total'] > 0:
+			consistentNgrams = doc['consistent']
+			# Unigrams
+			if consistentCounts['uni'] > 0:
+				cons_unigramstr += '\n'
+				consistentUnigrams = consistentNgrams['unigrams']
+				for unigram in consistentUnigrams:
+					cons_unigramstr += unigram + ','
+			
+			# Bigrams
+			if consistentCounts['bi'] > 0:
+				cons_bigramstr += '\n'
+				consistentBigrams = consistentNgrams['bigrams']
+				for bigram in consistentBigrams:
+					cons_bigramstr += bigram + ','
+
+			# Trigrams
+			if consistentCounts['tri'] > 0:
+				cons_trigramstr += '\n'
+				consistentTrigrams = consistentNgrams['trigrams']
+				for trigram in consistentTrigrams:
+					cons_trigramstr += trigram + ','
+	
+		cons_unigramstr += '\n'
+		cons_bigramstr += '\n'
+		cons_trigramstr += '\n'
+		print "Consistent Ngrams: ", cons_str, cons_unigramstr, cons_bigramstr, cons_trigramstr
+		
+
 
 def cleanCollections(db, trendname, lastk):
 	if trendname+'_tw_'+str(lastk) in db.collection_names():
@@ -244,6 +423,8 @@ def findtrending(db, trendname, duration, lastk, uni_thresh, bi_thresh, tri_thre
 			ret = findcandidates(db, trendname, start_time, lastk, uni_thresh, bi_thresh, tri_thresh)
 			if ret == True:
 				ret = checkSubtrending(db, trendname, lastk)
+				if ret == True:
+					ret = checkAcceleratingConsistent(db, trendname, lastk, lastk/2)
 			else:
 				print 'Nothing changed.'
 
@@ -251,6 +432,7 @@ def findtrending(db, trendname, duration, lastk, uni_thresh, bi_thresh, tri_thre
 		print 'sleeping now...'
 		time.sleep(int(duration))
 	
+
 def main():
 	args = sys.argv[1:]
 
