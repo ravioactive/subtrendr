@@ -112,13 +112,14 @@ def checkAcceleratingConsistent(db, trendname, lastk, lastk_accel, accel_thresh 
 		'$inc': {'accel_count' : accel_inc, 'trend_count' : 1},
 		'$push': {'sos_stats' : {'$each' : [(time_window, slope)], '$position' : insertpos, '$slice': 5}}
 		}
+		# make this a dictionary
 		if is_consistent == True:
 			if doc['n'] == 1:
-				consistent_unigrams.append(str(doc['_id']))
+				consistent_unigrams.append((str(doc['_id']), doc['trend_count'])+1))
 			if doc['n'] == 2:
-				consistent_bigrams.append(str(doc['_id']))
+				consistent_bigrams.append((str(doc['_id']), doc['trend_count'])+1))
 			if doc['n'] == 3:
-				consistent_trigrams.append(str(doc['_id']))
+				consistent_trigrams.append((str(doc['_id']), doc['trend_count'])+1))
 		if slope > accel_thresh:
 			if doc['n'] == 1:
 				accel_unigrams[str(doc['_id'])] = slope
@@ -366,21 +367,21 @@ def printSubtrending(db, trendname, lastk):
 				cons_unigramstr += '\n'
 				consistentUnigrams = consistentNgrams['unigrams']
 				for unigram in consistentUnigrams:
-					cons_unigramstr += unigram + ','
+					cons_unigramstr += unigram[0] + ','
 			
 			# Bigrams
 			if consistentCounts['bi'] > 0:
 				cons_bigramstr += '\n'
 				consistentBigrams = consistentNgrams['bigrams']
 				for bigram in consistentBigrams:
-					cons_bigramstr += bigram + ','
+					cons_bigramstr += bigram[0] + ','
 
 			# Trigrams
 			if consistentCounts['tri'] > 0:
 				cons_trigramstr += '\n'
 				consistentTrigrams = consistentNgrams['trigrams']
 				for trigram in consistentTrigrams:
-					cons_trigramstr += trigram + ','
+					cons_trigramstr += trigram[0] + ','
 	
 		cons_unigramstr += '\n'
 		cons_bigramstr += '\n'
