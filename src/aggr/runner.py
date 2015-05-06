@@ -23,10 +23,12 @@ start_time = datetime.utcnow()
 global end_time
 end_time = datetime.utcnow()
 
+global collsuffix
+collsuffix = ""
 
-def recordTimeWindow(trendname, lastk):
+def recordTimeWindow(trendname):
 	print 'recordTimeWindow called at time_window', time_window
-	twColl = db[trendname+'_tw_'+str(lastk)]
+	twColl = db[trendname+'_tw_'+collsuffix]
 	twColl.insert({'_id':time_window, 'start':start_time, 'end':end_time})
 	return
 
@@ -39,27 +41,35 @@ def quadraticKernel(x, a, b, c):
 	return a*x*x + b*x + c
 
 
-def curvefitting(lastKArr, slope_thresh = 0):
-	if len(lastKArr) < 2:
-		print 'Too less to infer from: Only 1 point.'
+def curvefitting(lastKArr, degree, slope_thresh = 0):
+	if degree == 1 and len(lastKArr) < 2:
+		# print 'Too less to infer from: Only 1 point.'
+		return (0, False)
+
+	if degree == 2 and len(lastKArr) < 3:
 		return (0, False)
 
 	npLastKArr = np.array(lastKArr)
 	xdata = npLastKArr[:,0]
 	ydata = npLastKArr[:,1]
 
-	print 'X:', xdata, 'Y:', ydata,
+	# print 'X:', xdata, 'Y:', ydata,
 	params = []
 	slope = -1
 	try:
-		params = curve_fit(linearKernel, xdata, ydata)
+		if degree == 1:
+			params = curve_fit(linearKernel, xdata, ydata)
+		elif degree == 2:
+			params = curve_fit(quadraticKernel, xdata, ydata)
+		else:
+			params = curve_fit(linearKernel, xdata, ydata)
 		slope = params[0][0]
 	except RuntimeError as rte:
 		print rte
 		slope = -1
 		pass
 
-	print 'm =', '{0:.3f}'.format(slope)
+	# print 'm =', '{0:.3f}'.format(slope)
 	return (slope, slope > slope_thresh)
 
 
@@ -83,11 +93,18 @@ def findInsertPosition(tuplearr, newval):
 		return pos
 
 
-def checkAcceleratingConsistent(db, trendname, lastk, lastk_accel, accel_thresh = 0, consistent_fraction = 3):
-	subtrendsColl = db[trendname+'_subtrend_'+str(lastk)]
+def checkAcceleratingConsistent(db, trendname, lastk, degree, lastk_accel, accel_thresh = 0, consistent_fraction = 3):
+	subtrendsColl = db[trendname+'_subtrend_'+collsuffix]
 	subtrendsBulk = subtrendsColl.initialize_unordered_bulk_op()
 	query = {'trending_window' : time_window}
-	filters = {'_id':True, 'n':True, 'sos':True, 'sos_stats':True, 'trend_count' : True, 'st_hist' : {'$slice' : lastk_accel}}
+	filters = {
+		'_id':True, 
+		'n':True, 
+		'sos':True, 
+		'sos_stats':True, 
+		'trend_count' : True, 
+		'st_hist' : {'$slice' : lastk_accel}
+	}
 
 	subtrendCursor = subtrendsColl.find(query, filters)
 	if subtrendCursor.count() < 1:
@@ -97,12 +114,12 @@ def checkAcceleratingConsistent(db, trendname, lastk, lastk_accel, accel_thresh 
 	accel_unigrams = {}
 	accel_bigrams = {}
 	accel_trigrams = {}
-	consistent_unigrams = []
-	consistent_bigrams = []
-	consistent_trigrams = []
+	consistent_unigrams = {}
+	consistent_bigrams = {}
+	consistent_trigrams = {}
 	num_accel_updates = 0
 	for doc in subtrendCursor:
-		(slope, _) = curvefitting(doc['st_hist'], accel_thresh)
+		(slope, _) = curvefitting(doc['st_hist'], degree, accel_thresh)
 		insertpos = findInsertPosition(doc['sos_stats'], slope)
 		is_consistent = True if (int(doc['trend_count'])+1) >= (time_window/consistent_fraction) else False
 		accel_inc = 0 if slope <= accel_thresh else 1
@@ -110,16 +127,16 @@ def checkAcceleratingConsistent(db, trendname, lastk, lastk_accel, accel_thresh 
 		acc_update = {
 		'$set' : {'sos' : slope, 'consistent' : is_consistent}, 
 		'$inc': {'accel_count' : accel_inc, 'trend_count' : 1},
-		'$push': {'sos_stats' : {'$each' : [(time_window, slope)], '$position' : insertpos, '$slice': 5}}
+		'$push': {'sos_stats' : {'$each' : [(time_window, slope)], '$position' : insertpos, '$slice': lastk}}
 		}
 		# make this a dictionary
 		if is_consistent == True:
 			if doc['n'] == 1:
-				consistent_unigrams.append((str(doc['_id']), doc['trend_count'])+1))
+				consistent_unigrams[str(doc['_id'])] = int(doc['trend_count'])+1
 			if doc['n'] == 2:
-				consistent_bigrams.append((str(doc['_id']), doc['trend_count'])+1))
+				consistent_bigrams[str(doc['_id'])] = int(doc['trend_count'])+1
 			if doc['n'] == 3:
-				consistent_trigrams.append((str(doc['_id']), doc['trend_count'])+1))
+				consistent_trigrams[str(doc['_id'])] = int(doc['trend_count'])+1
 		if slope > accel_thresh:
 			if doc['n'] == 1:
 				accel_unigrams[str(doc['_id'])] = slope
@@ -138,7 +155,7 @@ def checkAcceleratingConsistent(db, trendname, lastk, lastk_accel, accel_thresh 
 	rec_consistent_counts = {'uni':len(consistent_unigrams), 'bi':len(consistent_bigrams), 'tri':len(consistent_trigrams), 'total':len(consistent_unigrams)+len(consistent_bigrams)+len(consistent_trigrams)}
 	rec_accel_ngrams = { 'unigrams' : accel_unigrams, 'bigrams' : accel_bigrams, 'trigrams' : accel_trigrams }
 	rec_accel_counts = { 'uni':len(accel_unigrams), 'bi':len(accel_bigrams), 'tri':len(accel_trigrams), 'total' : len(accel_unigrams)+len(accel_bigrams)+len(accel_trigrams)}
-	subtrendRecordColl = db[trendname+'_subtrec_'+str(lastk)]
+	subtrendRecordColl = db[trendname+'_subtrec_'+collsuffix]
 	rec_query = {'_id' : time_window}
 	rec_update = {'$set' : {'accelerating' : rec_accel_ngrams, 'accel_count' : rec_accel_counts, 'consistent':rec_consistent_ngrams, 'consistent_count':rec_consistent_counts}}
 	subtrendRecordColl.update(rec_query, rec_update);
@@ -153,14 +170,14 @@ def checkAcceleratingConsistent(db, trendname, lastk, lastk_accel, accel_thresh 
 	return True
 
 
-def checkSubtrending(db, trendname, lastk):
-	workingset = db[trendname+'_workset_'+str(lastk)]
-	subtrendsColl = db[trendname+'_subtrend_'+str(lastk)]
-	subtrendRecordColl = db[trendname+'_subtrec_'+str(lastk)]
+def checkSubtrending(db, trendname, lastk, degree):
+	workingset = db[trendname+'_workset_'+collsuffix]
+	subtrendsColl = db[trendname+'_subtrend_'+collsuffix]
+	subtrendRecordColl = db[trendname+'_subtrec_'+collsuffix]
 
 	subtrendsBulk = subtrendsColl.initialize_unordered_bulk_op()
 	min_window = 0 if time_window <= lastk else (time_window - lastk)
-	print 'Min window : ', min_window
+	# print 'Min window : ', min_window
 	query = { 'latest_window' : {'$gte': min_window}}
 	filters = { '_id':True, 'n':True, 'latest_window':True, 'ws_hist' : {'$slice' : lastk}}
 	workingsetcursor = None
@@ -178,14 +195,14 @@ def checkSubtrending(db, trendname, lastk):
 	print 'ngram for time window', time_window, ':'
 
 	for doc in workingsetcursor:
-		print doc['_id'], ':', doc['n'], ':'
-		(slope, qualifies) = curvefitting(doc['ws_hist'])
+		(slope, qualifies) = curvefitting(doc['ws_hist'], degree)
+		# print doc['_id'], ':', doc['n'], ':'
 		if qualifies:
 			st_query = {'_id' : str(doc['_id'])}
 			st_update = {
-			'$setOnInsert' : {'_id': str(doc['_id']), 'n' : doc['n'], 'sos' : -1, 'sos_stats' :[], 'trend_count': 1, 'consistent' : False, 'accel_count' : 0 }, 
-			'$set' : {'trending_window' : time_window, 'latest_window' : doc['latest_window'], 'latest_slope' : slope}, 
-			'$push' : {'st_hist': {'$each' : [(time_window, slope)], '$position':0}}
+				'$setOnInsert' : {'_id': str(doc['_id']), 'n' : doc['n'], 'sos' : -1, 'sos_stats' :[], 'trend_count': 1, 'consistent' : False, 'accel_count' : 0 }, 
+				'$set' : {'trending_window' : time_window, 'latest_window' : doc['latest_window'], 'latest_slope' : slope}, 
+				'$push' : {'st_hist': {'$each' : [(time_window, slope)], '$position':0}}
 			}
 			subtrendsBulk.find(st_query).upsert().update(st_update)
 			if doc['n'] == 1:
@@ -195,9 +212,9 @@ def checkSubtrending(db, trendname, lastk):
 			elif doc['n'] == 3:
 				tri_subtrngrams[str(doc['_id'])] = slope
 			numsubtrupdates += 1
-			print 'QUALIFIES'
-		else:
-			print 'NOT QUALIFY'
+			# print 'QUALIFIES'
+		# else:
+			# print 'NOT QUALIFY'
 
 	if numsubtrupdates == 0:
 		print '\ncheckSubtrending: No ngram qualified or retrieved...'
@@ -226,7 +243,7 @@ def findcandidates(db, trendname, lasttime, lastk, uni_thresh, bi_thresh, tri_th
 	unicursor = None
 	bicursor = None
 	
-	workingSetColl = db[trendname+'_workset_'+str(lastk)]
+	workingSetColl = db[trendname+'_workset_'+collsuffix]
 	workingSetCollBulk = workingSetColl.initialize_unordered_bulk_op()
 	query = {'last_change':{'$gt':lasttime}}
 	filters = { '_id':True, 'total': True }		# ignore history!
@@ -237,29 +254,29 @@ def findcandidates(db, trendname, lasttime, lastk, uni_thresh, bi_thresh, tri_th
 	print 'uni:', unicursor.count(), 'bi:', bicursor.count(), 'tri:', tricursor.count()
 	
 	numupdates = 0;
-	print 'UNI >=', uni_thresh, ':'
+	# print 'UNI >=', uni_thresh, ':'
 	for doc in unicursor:
-		print doc['_id'], ':', doc['total'], ',',
+		# print doc['_id'], ':', doc['total'], ',',
 		if doc['total'] > uni_thresh:
 			ws_query = {'_id': str(doc['_id'])}
 			ws_update = {'$setOnInsert' : {'_id': str(doc['_id']), 'n' : 1 }, '$set' : {'latest_window' : time_window}, '$push': {'ws_hist' : { '$each' : [(time_window, doc['total'])], '$position':0}}}
 			workingSetCollBulk.find(ws_query).upsert().update(ws_update)
 			numupdates+=1
 
-	print '\nBI >=', bi_thresh, ':'
+	# print '\nBI >=', bi_thresh, ':'
 	
 	for doc in bicursor:
-		print doc['_id'], ':', doc['total'], ',',
+		# print doc['_id'], ':', doc['total'], ',',
 		if doc['total'] > bi_thresh:
 			ws_query = {'_id': str(doc['_id'])}
 			ws_update = {'$setOnInsert' : {'_id': str(doc['_id']), 'n' : 2 }, '$set' : {'latest_window' : time_window}, '$push' : {'ws_hist' : { '$each' : [(time_window, doc['total'])], '$position':0}}}
 			workingSetCollBulk.find(ws_query).upsert().update(ws_update)
 			numupdates+=1
 	
-	print '\nTRI >=', tri_thresh, ':'
+	# print '\nTRI >=', tri_thresh, ':'
 
 	for doc in tricursor:
-		print doc['_id'], ':', doc['total'], ',',
+		# print doc['_id'], ':', doc['total'], ',',
 		if doc['total'] > tri_thresh:
 			ws_query = {'_id': str(doc['_id'])}
 			ws_update = {'$setOnInsert' : {'_id': str(doc['_id']), 'n' : 3 }, '$set' : {'latest_window' : time_window}, '$push' : {'ws_hist' : { '$each' : [(time_window, doc['total'])], '$position':0}}}
@@ -282,7 +299,7 @@ def findcandidates(db, trendname, lasttime, lastk, uni_thresh, bi_thresh, tri_th
 
 
 def printSubtrending(db, trendname, lastk):
-	subtrends = db[trendname+'_subtrend_'+str(lastk)]
+	subtrends = db[trendname+'_subtrend_'+collsuffix]
 	st_query = {'trending_window':time_window}
 	filters = {'_id':True, 'n':True, 'trending_window':True, 'latest_window':True, 'latest_slope': True, 'st_hist' : {'$slice' : lastk}}
 	stcursor = subtrends.find(st_query, filters)
@@ -312,7 +329,7 @@ def printSubtrending(db, trendname, lastk):
 	print 'Trending 2GRAMs\n---------------\n', bislopes
 	print 'Trending 3GRAMs\n---------------\n', trislopes
 
-	subtrendRecordColl = db[trendname+'_subtrec_'+str(lastk)]
+	subtrendRecordColl = db[trendname+'_subtrec_'+collsuffix]
 	subtrec_query = {'_id':time_window}
 	subtrec_filters = {'accelerating':True, 'accel_count':True, 'consistent':True, 'consistent_count':True}
 	subtrec_cursor = subtrendRecordColl.find(subtrec_query, subtrec_filters)
@@ -366,22 +383,22 @@ def printSubtrending(db, trendname, lastk):
 			if consistentCounts['uni'] > 0:
 				cons_unigramstr += '\n'
 				consistentUnigrams = consistentNgrams['unigrams']
-				for unigram in consistentUnigrams:
-					cons_unigramstr += unigram[0] + ','
+				for unigram in consistentUnigrams.keys():
+					cons_unigramstr += unigram + ','
 			
 			# Bigrams
 			if consistentCounts['bi'] > 0:
 				cons_bigramstr += '\n'
 				consistentBigrams = consistentNgrams['bigrams']
-				for bigram in consistentBigrams:
-					cons_bigramstr += bigram[0] + ','
+				for bigram in consistentBigrams.keys():
+					cons_bigramstr += bigram + ','
 
 			# Trigrams
 			if consistentCounts['tri'] > 0:
 				cons_trigramstr += '\n'
 				consistentTrigrams = consistentNgrams['trigrams']
-				for trigram in consistentTrigrams:
-					cons_trigramstr += trigram[0] + ','
+				for trigram in consistentTrigrams.keys():
+					cons_trigramstr += trigram + ','
 	
 		cons_unigramstr += '\n'
 		cons_bigramstr += '\n'
@@ -391,21 +408,21 @@ def printSubtrending(db, trendname, lastk):
 
 
 def cleanCollections(db, trendname, lastk):
-	if trendname+'_tw_'+str(lastk) in db.collection_names():
-		preColl = db[trendname+'_tw_'+str(lastk)]
+	if trendname+'_tw_'+collsuffix in db.collection_names():
+		preColl = db[trendname+'_tw_'+collsuffix]
 		preColl.drop()
-	if trendname+'_workset'+str(lastk) in db.collection_names():
-		preColl = db[trendname+'_workset_'+str(lastk)]
+	if trendname+'_workset'+collsuffix in db.collection_names():
+		preColl = db[trendname+'_workset_'+collsuffix]
 		preColl.drop()
-	if trendname+'_subtrend_'+str(lastk) in db.collection_names():
-		preColl = db[trendname+'_subtrend_'+str(lastk)]
+	if trendname+'_subtrend_'+collsuffix in db.collection_names():
+		preColl = db[trendname+'_subtrend_'+collsuffix]
 		preColl.drop()
-	if trendname+'_subtrec_'+str(lastk) in db.collection_names():
-		preColl = db[trendname+'_subtrec_'+str(lastk)]
+	if trendname+'_subtrec_'+collsuffix in db.collection_names():
+		preColl = db[trendname+'_subtrec_'+collsuffix]
 		preColl.drop()
 
 
-def findtrending(db, trendname, duration, lastk, uni_thresh, bi_thresh, tri_thresh):
+def findtrending(db, trendname, duration, lastk, degree, uni_thresh, bi_thresh, tri_thresh):
 	print 'Called for the first time.'
 	print 'init time window = ', time_window
 	cleanCollections(db, trendname, lastk)
@@ -420,16 +437,18 @@ def findtrending(db, trendname, duration, lastk, uni_thresh, bi_thresh, tri_thre
 		if time_window < 1:
 			start_time = end_time - timedelta(seconds = int(duration))
 		else:
-			recordTimeWindow(trendname, lastk)
+			recordTimeWindow(trendname)
 			ret = findcandidates(db, trendname, start_time, lastk, uni_thresh, bi_thresh, tri_thresh)
 			if ret == True:
-				ret = checkSubtrending(db, trendname, lastk)
+				ret = checkSubtrending(db, trendname, lastk, degree)
 				if ret == True:
-					ret = checkAcceleratingConsistent(db, trendname, lastk, lastk/2)
+					ret = checkAcceleratingConsistent(db, trendname, lastk, degree, lastk/2)
 			else:
 				print 'Nothing changed.'
 
-			printSubtrending(db, trendname, lastk)
+			if time_window%20 == 0:
+				printSubtrending(db, trendname, lastk)
+
 		print 'sleeping now...'
 		time.sleep(int(duration))
 	
@@ -450,44 +469,57 @@ def main():
 
 	duration = 60
 	lastk = 10
+	degree = 1
 	ws_thresh_uni = 10
 	ws_thresh_bi = 7
 	ws_thresh_tri = 5
+	
 	if len(args) > 1:
-		duration = args[1]
+		duration = int(args[1])
 		if not duration or duration < 0:
 			duration = 60
     		print "Duration (in sec) not found in arguments. Using default: 60 seconds\n"
 
 		if len(args) > 2:
-			lastk = args[2]
+			lastk = int(args[2])
 			if not lastk or lastk < 0:
 				lastk = 10
 				print "Using last 10 stats\n"
 
 			if len(args) > 3:
-				ws_thresh_uni = args[3]
-				if not ws_thresh_uni or ws_thresh_uni < 0:
-					ws_thresh_uni = 10
+				degree = int(args[3])
+				if not degree or degree < 0:
+					degree = 1
 					print "Unigram threshold = 10"
 
 					if len(args) > 4:
-						ws_thresh_bi = args[4]
-						if not ws_thresh_bi or ws_thresh_bi < 0:
-							ws_thresh_bi = 7
-							print "Bigram threshold = 7"
+						ws_thresh_uni = int(args[4])
+						if not ws_thresh_uni or ws_thresh_uni < 0:
+							ws_thresh_uni = 10
+							print "Unigram threshold = 10"
 
-						if len(args) > 5:
-							ws_thresh_tri = args[5]
-							if not ws_thresh_tri or ws_thresh_tri < 0:
-								ws_thresh_tri = 5
-								print "Trigram threshold = 5"
+							if len(args) > 5:
+								ws_thresh_bi = int(args[5])
+								if not ws_thresh_bi or ws_thresh_bi < 0:
+									ws_thresh_bi = 7
+									print "Bigram threshold = 7"
+
+								if len(args) > 6:
+									ws_thresh_tri = int(args[6])
+									if not ws_thresh_tri or ws_thresh_tri < 0:
+										ws_thresh_tri = 5
+										print "Trigram threshold = 5"
 							
 
-	print "Calculating stats for trend ", trend, "..."
+	print "Calculating stats for trend ", trend, " with params :"
+	print "\t\nduration:", duration, "\t\nlastk:", lastk, "\t\ndegree:", degree
+	print "\tunigram threshold:", ws_thresh_uni, "\t\nbigram threshold:", ws_thresh_bi, "\t\ntrigram threshold:", ws_thresh_tri
+
+	global collsuffix
+	collsuffix = str(duration)+str(lastk)+str(degree)+str(ws_thresh_uni)+str(ws_thresh_bi)+str(ws_thresh_tri)
 
 	try:
-		thread.start_new_thread(findtrending, (db, trend, duration, lastk, ws_thresh_uni, ws_thresh_bi, ws_thresh_tri))
+		thread.start_new_thread(findtrending, (db, trend, duration, lastk, degree, ws_thresh_uni, ws_thresh_bi, ws_thresh_tri))
 	except:
 		print "Error: Unable to start thread."
 
